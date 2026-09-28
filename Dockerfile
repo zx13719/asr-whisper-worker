@@ -19,7 +19,7 @@ RUN pip3 install \
         ctranslate2 "faster-whisper>=1.2.0" "numpy>=2.1.0" \
         "nltk>=3.9.1" "omegaconf>=2.3.0" "pandas>=2.2.3" \
         "huggingface-hub>=0.28.1,<1" "transformers>=4.48.0,<5" \
-        torchcodec soundfile fastapi "uvicorn[standard]" python-multipart requests
+        torchcodec soundfile fastapi "uvicorn[standard]" python-multipart requests pyannote.core
 
 # whisperx without deps (pyannote is only needed for diarization)
 RUN pip3 install whisperx --no-deps
