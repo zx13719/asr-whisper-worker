@@ -24,6 +24,11 @@ RUN pip3 install \
 # whisperx without deps (pyannote is lazy-loaded and not needed for align-only)
 RUN pip3 install whisperx --no-deps
 
+# make the pyannote VAD import optional (we only ever use silero)
+RUN sed -i 's|^from whisperx.vads.pyannote import Pyannote as Pyannote|try:\n    from whisperx.vads.pyannote import Pyannote as Pyannote\nexcept Exception:\n    Pyannote = None|' \
+    /usr/local/lib/python3.10/dist-packages/whisperx/vads/__init__.py \
+    && cat /usr/local/lib/python3.10/dist-packages/whisperx/vads/__init__.py
+
 # nltk data
 RUN python3 -c "import nltk; nltk.download('punkt', quiet=True); nltk.download('punkt_tab', quiet=True)"
 
