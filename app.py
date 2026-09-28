@@ -151,7 +151,6 @@ def transcribe_one(item):
                 batch_size=int(item.get("batch_size", 16)),
                 language=language,
                 task="transcribe",
-                word_timestamps=word_timestamps,
             )
         asr_time = time.time() - t0
         segments = result.get("segments", [])
@@ -246,6 +245,27 @@ async def transcribe_batch(payload: dict):
     return JSONResponse({"count": len(out), "results": out})
 
 
+def rp_handler(job):
+    """Queue-based endpoint entrypoint."""
+    inp = job.get("input") or {}
+    if inp.get("items"):
+        items = inp["items"]
+        base = {k: v for k, v in inp.items() if k != "items"}
+        out = []
+        for it in items:
+            try:
+                out.append(transcribe_one({**base, **it}))
+            except Exception as e:  # noqa: BLE001
+                out.append({"error": str(e)})
+        return {"count": len(out), "results": out}
+    return transcribe_one(inp)
+
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "80")))
+    mode = os.environ.get("SERVE_MODE", "http")
+    if mode == "queue":
+        import runpod
+        runpod.serverless.start({"handler": rp_handler})
+    else:
+        import uvicorn
+        uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "80")))

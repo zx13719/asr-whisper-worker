@@ -19,7 +19,7 @@ RUN pip3 install \
         ctranslate2 "faster-whisper>=1.2.0" "numpy>=2.1.0" \
         "nltk>=3.9.1" "omegaconf>=2.3.0" "pandas>=2.2.3" \
         "huggingface-hub>=0.28.1,<1" "transformers>=4.48.0,<5" \
-        torchcodec soundfile fastapi "uvicorn[standard]" python-multipart requests pyannote.core
+        torchcodec soundfile fastapi "uvicorn[standard]" python-multipart requests pyannote.core runpod
 
 # whisperx without deps (pyannote is only needed for diarization)
 RUN pip3 install whisperx --no-deps
@@ -42,4 +42,4 @@ RUN python3 -c "import whisperx; whisperx.load_align_model(language_code='en', d
 COPY app.py /app.py
 
 EXPOSE 80
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-80} --workers 1 --timeout-keep-alive 75"]
+CMD ["python3", "-u", "/app.py"]
