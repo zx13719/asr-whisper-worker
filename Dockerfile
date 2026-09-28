@@ -35,7 +35,7 @@ RUN sed -i 's|^from whisperx.vads.pyannote import Pyannote as Pyannote|try:\n   
 RUN python3 -c "import nltk; nltk.download('punkt', quiet=True); nltk.download('punkt_tab', quiet=True)"
 
 # pre-download models so cold start doesn't fetch them
-RUN python3 -c "import whisperx; whisperx.load_model('large-v3', device='cpu', compute_type='int8')"
+RUN python3 -c "import whisperx; whisperx.load_model('large-v3', device='cpu', compute_type='int8', vad_method='silero')"
 RUN python3 -c "import whisperx; whisperx.load_align_model(language_code='zh', device='cpu')"
 RUN python3 -c "import whisperx; whisperx.load_align_model(language_code='en', device='cpu')"
 

@@ -59,7 +59,7 @@ def get_whisper():
         import whisperx
         t0 = time.time()
         log("loading whisper model", MODEL_NAME, COMPUTE_TYPE)
-        _whisper = whisperx.load_model(MODEL_NAME, DEVICE, compute_type=COMPUTE_TYPE)
+        _whisper = whisperx.load_model(MODEL_NAME, DEVICE, compute_type=COMPUTE_TYPE, vad_method="silero")
         log("whisper loaded in %.1fs" % (time.time() - t0))
     return _whisper
 
