@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip ffmpeg ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
+RUN pip3 install --upgrade pip setuptools wheel
+
 # torch 2.8.0 + cu128 (Blackwell sm_120 + Ada sm_89)
 RUN pip3 install --index-url https://download.pytorch.org/whl/cu128 \
         torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0
