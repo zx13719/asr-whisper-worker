@@ -84,7 +84,8 @@ class Client:
     def _request(self, method, url, body=None):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(url, data=data, method=method, headers={
-            'Authorization': 'Bearer ' + self.api_key, 'Content-Type': 'application/json'})
+            'Authorization': 'Bearer ' + self.api_key, 'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (compatible; Agent-MCN/1.0)'})
         try:
             with urllib.request.urlopen(req, timeout=360 if '.api.runpod.ai/' in url else 120) as r:
                 return json.load(r)

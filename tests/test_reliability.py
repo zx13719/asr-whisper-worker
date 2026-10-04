@@ -182,3 +182,24 @@ def test_batch_runner_processes_all_70_and_does_not_write_error_files(tmp_path, 
     assert len(list((tmp_path / 'asr-runpod-v2').glob('*.json'))) == 70 - bool(broken_id)
     summary = json.loads((tmp_path / 'runpod-asr-summary-v2.json').read_text())
     assert len(summary['failures']) == bool(broken_id)
+
+
+def test_supplied_transcript_bypasses_recognition_and_is_hashed(fake_model):
+    import hashlib
+    counters, wx = fake_model
+    script = "Hello, don't change this!"
+    observed = []
+    def align(segments, *a, **kw):
+        observed.append(segments)
+        return {'segments': [{'text': script, 'words': good()['words']}]}
+    wx.align = align
+    result = app.transcribe_one({'id': 'script', 'language': 'en', 'transcript': script})
+    assert counters['loads'] == 0
+    assert observed == [[{'start': 0.0, 'end': 1.0, 'text': script}]]
+    assert result['mode'] == 'forced_alignment'
+    assert result['transcript_sha256'] == hashlib.sha256(script.encode()).hexdigest()
+
+
+def test_forced_alignment_requires_explicit_language(fake_model):
+    with pytest.raises(ValueError, match='requires'):
+        app.transcribe_one({'transcript': 'hello'})
