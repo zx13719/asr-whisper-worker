@@ -41,7 +41,7 @@ jobs:
             VCS_REF=${{ github.sha }}
           tags: |
             ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:v3
+            ghcr.io/${{ github.repository }}:v4
             ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
 
       - name: Make package public

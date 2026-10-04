@@ -22,6 +22,7 @@ import time
 import base64
 import asyncio
 import math
+import hashlib
 from contextlib import asynccontextmanager
 import tempfile
 import threading
@@ -149,7 +150,16 @@ def transcribe_one(item):
 
     language = item.get("language") or DEFAULT_LANGUAGE
     align = item.get("align", True)
-    word_timestamps = item.get("word_timestamps", True)
+    transcript = item.get("transcript")
+    if transcript is not None and (not isinstance(transcript, str) or not transcript.strip()):
+        raise ValueError("transcript must be a nonempty string")
+    task = item.get("task", "transcribe")
+    if task not in {"transcribe", "translate"}:
+        raise ValueError("unsupported task")
+    if transcript is not None and (not align or not language or task != "transcribe"):
+        raise ValueError("forced alignment requires align=true, language and task=transcribe")
+    if task == "translate" and align:
+        raise ValueError("translated text cannot be force-aligned to source speech")
 
     with tempfile.TemporaryDirectory() as td:
         wav = fetch_audio(item, td)
@@ -158,14 +168,16 @@ def transcribe_one(item):
         duration = float(len(audio) / 16000)
 
         t0 = time.time()
-        with _model_lock:
-            model = get_whisper()
-            result = model.transcribe(
-                audio,
-                batch_size=int(item.get("batch_size", 16)),
-                language=language,
-                task="transcribe",
-            )
+        if transcript is not None:
+            # Forced alignment must preserve the caller's approved script, not ASR text.
+            result = {"language": language, "segments": [{"start": 0.0, "end": duration, "text": transcript}]}
+        else:
+            with _model_lock:
+                model = get_whisper()
+                result = model.transcribe(
+                    audio, batch_size=int(item.get("batch_size", 16)),
+                    language=language, task=task,
+                )
         asr_time = time.time() - t0
         segments = result.get("segments", [])
         lang = result.get("language") or language
@@ -205,6 +217,9 @@ def transcribe_one(item):
             raise RuntimeError("alignment produced no valid word timestamps")
         return {
             "id": item.get("id"),
+            "mode": "forced_alignment" if transcript is not None else "transcription",
+            "transcript_sha256": hashlib.sha256(transcript.encode()).hexdigest() if transcript is not None else None,
+            "revision": os.environ.get("IMAGE_REVISION", "unknown"),
             "language": lang,
             "duration": round(duration, 3),
             "text": text,

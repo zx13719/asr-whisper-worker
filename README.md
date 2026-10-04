@@ -61,3 +61,12 @@ Before switching production, copy `gpu_smoke.py` and `batch_client.py` into the
 candidate GPU container and run `python gpu_smoke.py /path/to/speech.wav`. Then run
 one ESR/ASR pair and validate media and timestamps before a full batch. CPU regression
 tests do not establish real GPU compatibility.
+
+## Transcript-locked alignment (v4)
+
+Both queue input and `/transcribe` accept `transcript` with `language` and `align:true`.
+When supplied, recognition is bypassed: WhisperX aligns that exact text against the
+full supplied audio. The response includes `mode:forced_alignment`, its UTF-8
+`transcript_sha256`, item `id`, and image revision. Callers must verify these fields
+before using the result for approved captions. An empty script or missing language
+is rejected. Ordinary recognition remains supported without `transcript`.
