@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import app
-from batch_client import Client, JobError, atomic_json, chunks, validate_asr
+from batch_client import Client, JobError, atomic_json, validate_asr
 
 
 def good():
@@ -64,10 +64,6 @@ def test_health_not_ready_until_warmup(monkeypatch):
     monkeypatch.setattr(app, '_startup_error', 'RuntimeError')
     assert app.ping().status_code == 503
 
-
-def test_chunking_never_skips_or_duplicates():
-    for n in [1, 4, 8, 40, 48, 70]:
-        assert sum(chunks(list(range(n)), 4), []) == list(range(n))
 
 
 @pytest.mark.parametrize('result', [{'error': '_lock'}, {}, {'text': 'a', 'duration': 1, 'words': []},
@@ -155,3 +151,34 @@ def test_explicit_terminal_retry_preserves_previous_job(tmp_path):
     state = json.loads(next(tmp_path.glob('*.json')).read_text())
     assert len(state['attempts']) == 2
     assert state['attempts'][0]['job_id'] == 'job'
+
+
+@pytest.mark.parametrize('broken_id', [None, 'video42'])
+def test_batch_runner_processes_all_70_and_does_not_write_error_files(tmp_path, monkeypatch, broken_id):
+    import run_batch
+    seen = []
+    masters = tmp_path / 'final'
+    masters.mkdir()
+    for i in range(70):
+        (masters / f'video{i:02d}-motion-master.mp4').write_bytes(b'fixture')
+    for name in ['RUNPOD_API_KEY', 'RUNPOD_ASR_ENDPOINT_ID', 'R2_BUCKET', 'R2_ENDPOINT_URL',
+                 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']:
+        monkeypatch.setenv(name, 'unused')
+    monkeypatch.setenv('MCN_WORK', str(tmp_path))
+    monkeypatch.setenv('R2_PUBLIC_BASE_URL', 'https://example.test')
+    monkeypatch.setattr(sys, 'argv', ['run_batch.py', '--stage', 'asr', '--asr-mode', 'http'])
+    monkeypatch.setitem(sys.modules, 'boto3', SimpleNamespace(client=lambda *a, **kw:
+        SimpleNamespace(head_object=lambda **kw: {'ContentLength': 1})))
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+        def run(self, key, endpoint, mode, payload, validate):
+            seen.append(payload['id'])
+            result = {'error': '_lock'} if payload['id'] == broken_id else {**good(), 'id': payload['id']}
+            return validate(result)
+    monkeypatch.setattr(run_batch, 'Client', FakeClient)
+    assert run_batch.main() == bool(broken_id)
+    assert sorted(seen) == [f'video{i:02d}' for i in range(70)]
+    assert len(list((tmp_path / 'asr-runpod-v2').glob('*.json'))) == 70 - bool(broken_id)
+    summary = json.loads((tmp_path / 'runpod-asr-summary-v2.json').read_text())
+    assert len(summary['failures']) == bool(broken_id)

@@ -35,12 +35,6 @@ def atomic_json(path, value):
             os.unlink(tmp)
 
 
-def chunks(items, size):
-    if size < 1:
-        raise ValueError('chunk size must be positive')
-    return [items[i:i + size] for i in range(0, len(items), size)]
-
-
 def validate_asr(result):
     if not isinstance(result, dict) or result.get('error'):
         raise JobError('ASR returned an error')
