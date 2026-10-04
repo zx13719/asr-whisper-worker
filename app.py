@@ -2,7 +2,7 @@
 
 large-v3 (faster-whisper via WhisperX) + wav2vec2 forced alignment (word/char timestamps).
 Runs a FastAPI server on $PORT (default 80) with a /ping health check and real
-concurrency (async + bounded thread pool sharing one GPU model).
+concurrent I/O and serialized access to the shared GPU model.
 
 Endpoints
   GET  /ping                         -> health (200)
@@ -13,16 +13,16 @@ Endpoints
 Env
   WHISPER_MODEL   default "large-v3"
   COMPUTE_TYPE    default "float16"
-  MAX_CONCURRENCY default 4
+  MAX_CONCURRENCY default 4 (I/O only; GPU/model access is serialized)
   DEFAULT_LANGUAGE (optional, e.g. "zh")
   R2_*            optional, to accept {"key": "..."} inputs from R2
 """
 import os
-import io
-import sys
 import time
 import base64
 import asyncio
+import math
+from contextlib import asynccontextmanager
 import tempfile
 import threading
 import subprocess
@@ -39,10 +39,24 @@ MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "4"))
 DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE") or None
 DEVICE = "cuda"
 
-app = FastAPI(title="ASR large-v3 + aligner")
+_ready = threading.Event()
+_startup_error = None
+
+
+@asynccontextmanager
+async def lifespan(app):
+    task = asyncio.create_task(asyncio.to_thread(warmup))
+    try:
+        yield
+    finally:
+        await task
+
+
+app = FastAPI(title="ASR large-v3 + aligner", lifespan=lifespan)
 
 _executor = ThreadPoolExecutor(max_workers=max(2, MAX_CONCURRENCY))
-_gpu_sem = threading.Semaphore(MAX_CONCURRENCY)
+# WhisperX/Silero keep mutable state. I/O can overlap, model calls cannot.
+_model_lock = threading.RLock()
 
 _whisper = None
 _align = {}
@@ -55,19 +69,20 @@ def log(*a):
 
 def get_whisper():
     global _whisper
-    if _whisper is None:
-        import whisperx
-        t0 = time.time()
-        log("loading whisper model", MODEL_NAME, COMPUTE_TYPE)
-        _whisper = whisperx.load_model(MODEL_NAME, DEVICE, compute_type=COMPUTE_TYPE, vad_method="silero")
-        log("whisper loaded in %.1fs" % (time.time() - t0))
-    return _whisper
+    with _model_lock:
+        if _whisper is None:
+            import whisperx
+            t0 = time.time()
+            log("loading whisper model", MODEL_NAME, COMPUTE_TYPE)
+            _whisper = whisperx.load_model(MODEL_NAME, DEVICE, compute_type=COMPUTE_TYPE, vad_method="silero")
+            log("whisper loaded in %.1fs" % (time.time() - t0))
+        return _whisper
 
 
 def get_align(language):
     if not language:
         return None
-    with _align_lock:
+    with _model_lock, _align_lock:
         if language not in _align:
             import whisperx
             t0 = time.time()
@@ -130,7 +145,6 @@ def fetch_audio(item, workdir):
 
 def transcribe_one(item):
     """Blocking: download/decode -> ASR -> forced alignment. Runs in a thread."""
-    import soundfile as sf
     import whisperx
 
     language = item.get("language") or DEFAULT_LANGUAGE
@@ -143,9 +157,9 @@ def transcribe_one(item):
         # NB: torchaudio/whisperx load_audio may emit float32 numpy
         duration = float(len(audio) / 16000)
 
-        model = get_whisper()
         t0 = time.time()
-        with _gpu_sem:
+        with _model_lock:
+            model = get_whisper()
             result = model.transcribe(
                 audio,
                 batch_size=int(item.get("batch_size", 16)),
@@ -157,20 +171,18 @@ def transcribe_one(item):
         lang = result.get("language") or language
 
         align_time = 0.0
-        if align and lang:
-            try:
+        if align:
+            if not lang:
+                raise RuntimeError("alignment requested but language is unknown")
+            t1 = time.time()
+            with _model_lock:
                 am = get_align(lang)
-                if am is not None:
-                    t1 = time.time()
-                    with _gpu_sem:
-                        aligned = whisperx.align(
-                            segments, am[0], am[1], audio, DEVICE,
-                            return_char_alignments=bool(item.get("char_alignments", False)),
-                        )
-                    segments = aligned.get("segments", segments)
-                    align_time = time.time() - t1
-            except Exception as e:  # noqa: BLE001
-                log("align failed:", repr(e))
+                aligned = whisperx.align(
+                    segments, am[0], am[1], audio, DEVICE,
+                    return_char_alignments=bool(item.get("char_alignments", False)),
+                )
+            segments = aligned["segments"]
+            align_time = time.time() - t1
 
         words = []
         for s in segments:
@@ -183,7 +195,16 @@ def transcribe_one(item):
                 })
 
         text = "".join((s.get("text") or "") for s in segments).strip()
+        if align and text and not any(
+            isinstance(w.get("start"), (int, float))
+            and isinstance(w.get("end"), (int, float))
+            and math.isfinite(w["start"]) and math.isfinite(w["end"])
+            and 0 <= w["start"] < w["end"] <= duration + 0.25
+            for w in words
+        ):
+            raise RuntimeError("alignment produced no valid word timestamps")
         return {
+            "id": item.get("id"),
             "language": lang,
             "duration": round(duration, 3),
             "text": text,
@@ -196,8 +217,32 @@ def transcribe_one(item):
         }
 
 
+def warmup():
+    global _startup_error
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is unavailable")
+        with _model_lock:
+            model = get_whisper()
+            model.transcribe(np.zeros(16000, dtype=np.float32), batch_size=1,
+                             language=DEFAULT_LANGUAGE or "en", task="transcribe")
+            for language in {"en", DEFAULT_LANGUAGE} - {None}:
+                get_align(language)
+        _ready.set()
+    except Exception as exc:
+        _startup_error = type(exc).__name__
+        log("warmup failed", repr(exc))
+        raise
+
+
 @app.get("/ping")
 def ping():
+    if _startup_error:
+        return JSONResponse({"status": "failed", "error": _startup_error}, status_code=503)
+    if not _ready.is_set():
+        from fastapi.responses import Response
+        return Response(status_code=204)
     return {"status": "ok"}
 
 
@@ -205,9 +250,12 @@ def ping():
 def info():
     import torch
     return {
+        "revision": os.environ.get("IMAGE_REVISION", "unknown"),
+        "ready": _ready.is_set(),
         "model": MODEL_NAME,
         "compute_type": COMPUTE_TYPE,
         "max_concurrency": MAX_CONCURRENCY,
+        "gpu_concurrency": 1,
         "cuda": torch.cuda.is_available(),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "arch_list": torch.cuda.get_arch_list() if torch.cuda.is_available() else [],
@@ -217,6 +265,8 @@ def info():
 
 @app.post("/transcribe")
 async def transcribe(payload: dict):
+    if not _ready.is_set():
+        raise HTTPException(status_code=503, detail="model is not ready")
     loop = asyncio.get_event_loop()
     try:
         res = await loop.run_in_executor(_executor, transcribe_one, payload)
@@ -228,6 +278,8 @@ async def transcribe(payload: dict):
 
 @app.post("/transcribe_batch")
 async def transcribe_batch(payload: dict):
+    if not _ready.is_set():
+        raise HTTPException(status_code=503, detail="model is not ready")
     items = payload.get("items") or []
     if not items:
         raise HTTPException(status_code=400, detail="items required")
@@ -237,9 +289,9 @@ async def transcribe_batch(payload: dict):
     futs = [loop.run_in_executor(_executor, transcribe_one, m) for m in merged]
     results = await asyncio.gather(*futs, return_exceptions=True)
     out = []
-    for r in results:
+    for item, r in zip(merged, results):
         if isinstance(r, Exception):
-            out.append({"error": str(r)})
+            out.append({"id": item.get("id"), "error": str(r)})
         else:
             out.append(r)
     return JSONResponse({"count": len(out), "results": out})
@@ -256,15 +308,18 @@ def rp_handler(job):
             try:
                 out.append(transcribe_one({**base, **it}))
             except Exception as e:  # noqa: BLE001
-                out.append({"error": str(e)})
+                out.append({"id": it.get("id"), "error": str(e)})
         return {"count": len(out), "results": out}
     return transcribe_one(inp)
 
 
 if __name__ == "__main__":
     mode = os.environ.get("SERVE_MODE", "http")
+    if mode not in {"queue", "http"}:
+        raise ValueError("SERVE_MODE must be queue or http")
     if mode == "queue":
         import runpod
+        warmup()
         runpod.serverless.start({"handler": rp_handler})
     else:
         import uvicorn
